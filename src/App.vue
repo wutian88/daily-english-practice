@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue';
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import { useRegisterSW } from 'virtual:pwa-register/vue';
 import { lessonsByTrack, builtInWords, wordById, foundations, practiceWords } from './data/content';
 import type { Lesson, TrackId, WordItem, CustomWord, Rating, PracticeRecord, DailySession } from './types/wordbook';
@@ -9,13 +9,24 @@ import { rateItem, dueRecords, selectNextLesson, localDate } from './lib/schedul
 import { searchWords } from './lib/search';
 import { selectVoice } from './lib/speech';
 import { checkWaitingUpdate } from './lib/updates';
+import { initialTvMode, installTvNavigation } from './lib/tv';
 import WordCard from './components/WordCard.vue';
 import SpeakingPractice from './components/SpeakingPractice.vue';
 import LessonQuiz from './components/LessonQuiz.vue';
 type Page='today'|'courses'|'lesson'|'speaking'|'wordbook'|'mine';
 const page=ref<Page>('today'); const track=ref<TrackId>('primary');
+const tvMode=ref(initialTvMode(location.search,undefined,navigator.userAgent));
+let tvNavigation:ReturnType<typeof installTvNavigation>|undefined;
+const navigationHistory:{page:Page;focus?:string}[]=[];
+let restoreFocus:string|undefined;
+watch(tvMode,(enabled)=>{document.documentElement.classList.toggle('tv-mode',enabled);},{immediate:true});
+
+async function toggleTv(){if(busy.value)return;tvMode.value=!tvMode.value;const address=new URL(location.href);address.searchParams.set('tv',tvMode.value?'1':'0');history.replaceState(null,'',address);try{await setSetting('tvMode',tvMode.value?'1':'0');}catch{message('显示已切换，但未能保存电视模式设置。');}}
+function back(){if(busy.value){message('请先停止录音，等待保存后再返回。');return;}const previous=navigationHistory.pop();restoreFocus=previous?.focus;if(previous){navigate(previous.page,false);}else if(page.value!=='today'){navigate('today',false);}else{message('已在首页。按左键进入底部导航，或选择“退出电视模式”。');tvNavigation?.focusNav();}}
+
 const names={primary:'小学英语',middle:'初中英语'};const trackName=computed(()=>names[track.value]);
 const ready=ref(false);const fatal=ref('');const toast=ref('');const busy=ref(false);
+watch([page,ready,tvMode],async()=>{await nextTick();if(ready.value&&tvMode.value){tvNavigation?.focusMain(restoreFocus);restoreFocus=undefined;}});
 const online=ref(navigator.onLine);const now=ref(Date.now());const rate=ref(0.9);
 const progress=ref<PracticeRecord[]>([]);const sessions=ref<DailySession[]>([]);const custom=ref<CustomWord[]>([]);
 const activeId=ref('primary-01');const courseList=computed(()=>lessonsByTrack[track.value]);
@@ -44,11 +55,12 @@ function speak(text:string){
  refreshVoices();stopVoice();const utterance=new SpeechSynthesisUtterance(text);utterance.lang=selectedVoice.value?.lang??'en-US';utterance.voice=selectedVoice.value??null;utterance.rate=rate.value;
  utterance.onerror=e=>{if(e.error!=='interrupted'&&e.error!=='canceled')message('朗读未完成，请检查设备语音、音量和网络。');};speechSynthesis.speak(utterance);
 }
-async function load(){try{const[p,s,c,t]=await Promise.all([allProgress(),allSessions(),allCustomWords(),getSetting('track')]);progress.value=p;sessions.value=s;custom.value=c;if(t==='primary'||t==='middle')track.value=t;activeId.value=courseList.value[0]!.id;ready.value=true;}catch{fatal.value='无法打开本地存储，请检查浏览器是否允许网站保存数据，再刷新重试。';}}
-onMounted(()=>{void load();refreshVoices();if('speechSynthesis'in window)speechSynthesis.addEventListener('voiceschanged',refreshVoices);window.addEventListener('online',connection);window.addEventListener('offline',connection);timer=setInterval(()=>now.value=Date.now(),30000);});
-onUnmounted(()=>{clearInterval(timer);clearTimeout(toastTimer);stopVoice();if(backupUrl)URL.revokeObjectURL(backupUrl);if('speechSynthesis'in window)speechSynthesis.removeEventListener('voiceschanged',refreshVoices);window.removeEventListener('online',connection);window.removeEventListener('offline',connection);});
-function navigate(target:Page){if(busy.value)return;stopVoice();page.value=target;window.scrollTo({top:0});}
-async function switchTrack(value:TrackId){if(busy.value||track.value===value)return;stopVoice();track.value=value;activeId.value=courseList.value[0]!.id;oralIndex.value=0;override.value=null;search.value='';clearForm();navigate('today');try{await setSetting('track',value);}catch{message('切换成功，但未能保存学段选择。');}}
+async function load(){try{const[p,s,c,t,tv]=await Promise.all([allProgress(),allSessions(),allCustomWords(),getSetting('track'),getSetting('tvMode')]);tvMode.value=initialTvMode(location.search,tv,navigator.userAgent);progress.value=p;sessions.value=s;custom.value=c;if(t==='primary'||t==='middle')track.value=t;activeId.value=courseList.value[0]!.id;ready.value=true;}catch{fatal.value='无法打开本地存储，请检查浏览器是否允许网站保存数据，再刷新重试。';}}
+onMounted(()=>{tvNavigation=installTvNavigation({enabled:()=>tvMode.value,onBack:back});void load();refreshVoices();if('speechSynthesis'in window)speechSynthesis.addEventListener('voiceschanged',refreshVoices);window.addEventListener('online',connection);window.addEventListener('offline',connection);timer=setInterval(()=>now.value=Date.now(),30000);});
+onUnmounted(()=>{tvNavigation?.dispose();document.documentElement.classList.remove('tv-mode');clearInterval(timer);clearTimeout(toastTimer);stopVoice();if(backupUrl)URL.revokeObjectURL(backupUrl);if('speechSynthesis'in window)speechSynthesis.removeEventListener('voiceschanged',refreshVoices);window.removeEventListener('online',connection);window.removeEventListener('offline',connection);});
+function navigate(target:Page,remember=true){if(busy.value)return;if(remember&&page.value!==target){navigationHistory.push({page:page.value,focus:(document.activeElement as HTMLElement)?.getAttribute('data-tv-focus-id')??undefined});if(navigationHistory.length>30)navigationHistory.shift();}stopVoice();page.value=target;window.scrollTo({top:0});}
+async function switchTrack(value:TrackId){if(busy.value||track.value===value)return;stopVoice();track.value=value;activeId.value=courseList.value[0]!.id;oralIndex.value=0;override.value=null;search.value='';clearForm();navigationHistory.length=0;navigate('today',false);try{await setSetting('track',value);}catch{message('切换成功，但未能保存学段选择。');}}
+function backToCourses(){if(navigationHistory[navigationHistory.length-1]?.page==='courses')back();else navigate('courses',false);}
 function openLesson(value:Lesson){if(busy.value)return;activeId.value=value.id;override.value=null;oralIndex.value=0;navigate('lesson');}
 function practice(word?:WordItem){if(word){const owner=courseList.value.find(l=>practiceWords(l).some(w=>w.id===word.id));if(owner)activeId.value=owner.id;}override.value=word??null;if(!word){oralMode.value='sentences';oralIndex.value=0;}navigate('speaking');}
 function chooseMode(mode:typeof oralMode.value){if(busy.value)return;stopVoice();oralMode.value=mode;override.value=null;oralIndex.value=0;}
@@ -66,11 +78,15 @@ const nav:{id:Page;icon:string;label:string}[]=[{id:'today',icon:'⌂',label:'�
 </script>
 <template>
  <a class="skip" href="#main">跳到主要内容</a>
- <header class="site-header"><a class="brand" href="#" @click.prevent="navigate('today')"><span class="brand-mark">Aa</span><span>每日英语<small>一点一点，开口表达</small></span></a><span class="connection">{{online?'本机学习 · 已联网':'离线学习中'}}</span></header>
+ <header class="site-header"><a class="brand" href="#" @click.prevent="navigate('today')"><span class="brand-mark">Aa</span><span>每日英语<small>一点一点，开口表达</small></span></a><div class="header-actions"><span class="connection">{{online?'本机学习 · 已联网':'离线学习中'}}</span><button class="tv-toggle" :aria-pressed="tvMode" :disabled="busy" @click="toggleTv">{{tvMode?'退出电视模式':'电视模式'}}</button></div></header>
  <template v-if="ready">
   <div class="top-controls"><div class="track-switch" aria-label="选择学段"><button v-for="(label,key) in names" :key="key" :disabled="busy" :class="{active:track===key}" :aria-pressed="track===key" @click="switchTrack(key)">{{label}}<small>{{key==='primary'?'字母 · 短句 · 生活':'句型 · 阅读 · 表达'}}</small></button></div><label class="speed-control">语速<select v-model.number="rate" :disabled="busy"><option :value="0.7">慢速</option><option :value="0.9">正常</option></select></label></div>
   <p v-if="busy" class="notice" role="status">正在处理录音，请先停止并等待保存，再切换页面。</p>
   <div v-if="needRefresh" class="notice">有新版本可用。<button class="text-button" :disabled="busy||updating" @click="updateApp">立即更新 →</button></div>
+  <aside v-if="tvMode" class="tv-toolbar" aria-label="电视遥控操作">
+   <div><strong>电视模式</strong><span>方向键移动 · OK 确认 · 返回键回上一级 · 左侧边界 ← 到导航</span><small>下拉框按 OK 进入，↑↓选择，再按 OK 完成；输入框按 OK 编辑，返回键结束。</small></div>
+   <div class="actions"><button class="secondary" :disabled="busy" @click="back">← 返回</button><button class="secondary" :disabled="busy" @click="tvNavigation?.focusNav()">打开导航</button></div>
+  </aside>
   <main id="main">
    <section v-if="page==='today'">
     <div class="hero"><div><p class="eyebrow">A LITTLE ENGLISH, EVERY DAY</p><h1>今天，<br>说一点英语<span>。</span></h1><p>{{trackName}} · 从听懂一个词，到说清一句话。</p><div class="hero-actions"><button class="primary" @click="openLesson(next??courseList[0]!)">{{next?'开始下一课':'回顾第一课'}} →</button><button class="secondary" @click="practice()">去练口语</button></div></div><div class="hero-art" aria-hidden="true"><div class="art-orbit"></div><div class="speech-bubble">Hello!</div><div class="art-book">Aa<small>LISTEN • SPEAK • GROW</small></div><span class="spark">✦</span></div></div>
@@ -83,10 +99,10 @@ const nav:{id:Page;icon:string;label:string}[]=[{id:'today',icon:'⌂',label:'�
    </section>
    <section v-else-if="page==='courses'">
     <div class="page-title"><p class="eyebrow">{{trackName}} · COURSE MAP</p><h1>每一课，向前一点</h1><p>按顺序打基础，也可以自由选择你需要的主题。</p></div>
-    <section v-for="(unit,i) in units" :key="unit" class="unit"><div class="section-heading"><h2><span class="unit-index">{{String(i+1).padStart(2,'0')}}</span>{{unit}}</h2><span class="muted">4 课</span></div><div class="course-grid"><button v-for="item in courseList.filter(x=>x.unit===unit)" :key="item.id" class="course-card" @click="openLesson(item)"><small>LESSON {{String(item.order).padStart(2,'0')}}</small><h3>{{item.title}}</h3><p>{{item.words.length}} 个表达 · 口语 · 小测</p><span :class="{done:completed.has(item.id)}">{{completed.has(item.id)?'已完成 ✓':'开始学习 ↗'}}</span></button></div></section>
+    <section v-for="(unit,i) in units" :key="unit" class="unit"><div class="section-heading"><h2><span class="unit-index">{{String(i+1).padStart(2,'0')}}</span>{{unit}}</h2><span class="muted">4 课</span></div><div class="course-grid"><button v-for="item in courseList.filter(x=>x.unit===unit)" :key="item.id" :data-tv-focus-id="item.id" class="course-card" @click="openLesson(item)"><small>LESSON {{String(item.order).padStart(2,'0')}}</small><h3>{{item.title}}</h3><p>{{item.words.length}} 个表达 · 口语 · 小测</p><span :class="{done:completed.has(item.id)}">{{completed.has(item.id)?'已完成 ✓':'开始学习 ↗'}}</span></button></div></section>
    </section>
    <section v-else-if="page==='lesson'">
-    <button class="text-button" @click="navigate('courses')">← 返回课程</button><div class="page-title"><p class="eyebrow">{{trackName}} · LESSON {{lesson.order}} · {{lesson.unit}}</p><h1>{{lesson.title}}</h1><p>{{lesson.focus}}</p></div><div class="sound-tip"><strong>本课发音重点</strong><p>{{lesson.sound}}</p><button class="text-button" @click="practice()">开始本课口语跟读 →</button></div>
+    <button class="text-button" @click="backToCourses">← 返回课程</button><div class="page-title"><p class="eyebrow">{{trackName}} · LESSON {{lesson.order}} · {{lesson.unit}}</p><h1>{{lesson.title}}</h1><p>{{lesson.focus}}</p></div><div class="sound-tip"><strong>本课发音重点</strong><p>{{lesson.sound}}</p><button class="text-button" @click="practice()">开始本课口语跟读 →</button></div>
     <div class="section-heading"><h2>词汇与表达</h2><span class="muted">听一听，再说一遍</span></div><div class="word-grid"><WordCard v-for="word in lesson.words" :key="word.id" :word="word" @speak="speak" @rate="remember" @practice="practice"/></div>
     <section class="panel"><p class="eyebrow">USE IT IN A SENTENCE</p><h2>{{track==='middle'?'短文与常用句':'常用句'}}</h2><p v-if="track==='middle'" class="reading-passage">{{lesson.sentences.map(x=>x.en).join(' ')}}</p><article v-for="sentence in lesson.sentences" :key="sentence.id" class="sentence"><div><h3>{{sentence.en}}</h3><p class="muted">{{sentence.zh}}</p></div><div class="actions"><button class="play-button" :aria-label="`朗读 ${sentence.en}`" @click="speak(sentence.en)">▶</button><button class="text-button" @click="practice(wordById(sentence.id))">跟读</button></div></article></section>
     <section class="panel"><p class="eyebrow">A LITTLE CONVERSATION</p><h2>情景对话</h2><article v-for="(line,i) in lesson.dialogue" :key="i" class="dialogue-line"><span class="speaker">{{line.speaker}}</span><div><p>{{line.en}}</p><p class="muted">{{line.zh}}</p></div><button class="play-button" :aria-label="`朗读对话第 ${i+1} 句`" @click="speak(line.en)">▶</button></article></section>
@@ -113,11 +129,12 @@ const nav:{id:Page;icon:string;label:string}[]=[{id:'today',icon:'⌂',label:'�
    <section v-else>
     <div class="page-title"><p class="eyebrow">MY LEARNING</p><h1>学习，留在你手里</h1><p>无需账号，进度、自定义词条和录音保存在当前设备。</p></div><section class="panel"><h2>应用更新</h2><p role="status">{{updateText}}</p><button class="primary wide" :disabled="busy||updating" @click="updateApp">{{updating?'正在处理…':needRefresh?'立即更新':'检查更新'}}</button></section>
     <section class="panel"><h2>学习备份</h2><p>导出两个学段的课程进度、复习记录和自定义词库；录音不包含在 JSON 中。</p><div class="actions"><button class="primary" @click="exportData">导出备份 JSON</button><label class="secondary file-button">导入备份 JSON<input type="file" accept=".json,application/json" @change="importData"></label></div><p class="muted">只接受本应用的备份，不与完整版互导。Safari 和主屏幕应用可能使用不同存储；换设备、卸载或清理网站数据前请先导出。</p></section>
+    <section class="panel"><h2>电视模式与海信电视</h2><p>用电视浏览器打开本网址，点击页面顶部“电视模式”；也可以在地址末尾加 ?tv=1 直接进入。支持方向键选中、OK 确认与返回上一级。海信不同型号的浏览器和语音支持不同，遥控器的语音麦克风不一定可供网页录音。</p><button class="secondary" @click="toggleTv">{{tvMode?'切回普通布局':'开启电视模式'}}</button><p class="muted">电视无英文声线或网页录音权限时，可用大屏阅读、练口语和做小测；朗读、录音需浏览器支持。本网页不是海信应用商店中的原生应用。</p></section>
     <section class="panel"><h2>语音与离线</h2><p>{{voiceStatus}}</p><p>首次联网打开并缓存后，课程、词库和小测可离线使用；系统朗读的离线能力取决于安装的语音。iPhone 可在系统设置中搜索“朗读内容”或“语音”，下载英文声线。</p><p class="muted">录音最长 60 秒，每项保留最新一条，重录前确认。应用不接入语音识别，不生成自动发音分数。</p></section>
     <section class="panel"><h2>关于课程</h2><p>小学 24 课、初中 32 课，共 402 个词汇／表达，另有 14 项发音基础练习。按通用基础难度组织，非特定教材同步版。例句、对话和练习为本项目编写。</p><p class="muted">适合配合课堂与家长指导使用；系统合成示范不等同于真人教师纠音。无广告、无账号、无收费接口。</p></section>
    </section>
   </main>
-  <nav class="bottom-nav" aria-label="主要导航"><button v-for="item in nav" :key="item.id" :class="{active:page===item.id||(page==='lesson'&&item.id==='courses')}" :disabled="busy" @click="navigate(item.id)"><span>{{item.icon}}</span>{{item.label}}</button></nav>
+  <nav class="bottom-nav" aria-label="主要导航"><button v-for="item in nav" :key="item.id" :aria-current="page===item.id||(page==='lesson'&&item.id==='courses')?'page':undefined" :class="{active:page===item.id||(page==='lesson'&&item.id==='courses')}" :disabled="busy" @click="navigate(item.id)"><span>{{item.icon}}</span>{{item.label}}</button></nav>
  </template><main v-else><p class="panel" role="status">{{fatal||'正在打开你的英语练习…'}}</p><button v-if="fatal" class="primary" @click="load">重试</button></main>
  <div v-if="toast" class="toast" role="status">{{toast}}</div>
 </template>
